@@ -121,7 +121,7 @@ COPY --chmod=744 ./web/conf/nginx.conf /etc/nginx/sites-enabled/web.conf
 
 RUN chmod +x /run/*.sh
 
-RUN mv /run/w10slim.remmina $HOME/Desktop/w10.remmina
+RUN mv /run/windows.remmina $HOME/Desktop/windows.remmina
 
 COPY run.sh $HOME/Desktop/run.sh
 
