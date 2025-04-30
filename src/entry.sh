@@ -40,3 +40,5 @@ sed -u -e 's/\x1B\[[=0-9;]*[a-z]//gi' \
 
 sleep 1 & wait $!
 [ ! -f "$QEMU_END" ] && finish 0
+
+pause

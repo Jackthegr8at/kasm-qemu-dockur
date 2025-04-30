@@ -1,3 +1,159 @@
+# Kasm QEMU/Dockur Integration
+
+This document outlines the setup process for running Windows virtual machines using QEMU and Dockur within a Kasm Workspaces environment. This custom configuration allows for persistent or non-persistent Windows VMs accessible via Kasm.
+
+## Host System Preparation
+
+Before configuring Kasm, prepare the host system where Kasm is running:
+
+1.  **Create Shared Directories:** These directories will store persistent VM data and shared OEM customization files.
+    ```bash
+    # Main directory for shared data
+    sudo mkdir -p /mnt/kasm_user_share
+    # Example sub-directory for a specific Windows 11 VM's persistent disk
+    sudo mkdir -p /mnt/kasm_user_share/w11
+    # Directory for OEM customization scripts and files
+    sudo mkdir -p /mnt/kasm_user_share/oem
+    ```
+
+2.  **Set Ownership:** Ensure the Kasm user (typically UID/GID 1000) has ownership of the shared directories.
+    ```bash
+    sudo chown -R 1000:1000 /mnt/kasm_user_share/
+    ```
+
+3.  **Copy OEM Files:** Copy the `oem` directory from this repository source to the host path created above. This directory contains customization scripts run during the Windows installation within the container.
+    ```bash
+    # Example: Assuming you are in the root of this git repository
+    sudo cp -r ./oem /mnt/kasm_user_share/
+    ```
+    *   **Note:** The default `install.bat` within the `oem` folder is configured to change the Windows RDP port to `3366` (as Kasm uses `3389`), add a corresponding firewall rule, and restart the RDP service.
+
+## Docker Image Build
+
+Build the custom Docker image that includes QEMU, Dockur, and the necessary startup scripts:
+
+```bash
+# Navigate to the directory containing the Dockerfile
+cd /path/to/your/git/repo
+# Build the image
+sudo docker build -t qemu-dockur:latest -f Dockerfile .
+```
+
+*   *(Optional but recommended)*: Consider pushing this image to a private registry accessible by your Kasm deployment for easier management.
+
+## Kasm Workspace Configuration
+
+Create a new Workspace in your Kasm UI with the following settings:
+
+1.  **Docker Image:**
+    *   `qemu-dockur:latest` (or the name/tag you used if different, potentially including your private registry prefix).
+
+2.  **Volume Mappings:**
+    *   Map the host directories created earlier into the container. This example maps the specific `w11` directory for persistent storage. See the "Recommendations" section for non-persistent usage.
+    ```json
+    {
+      "/mnt/kasm_user_share/w11": {
+        "bind": "/storage",
+        "mode": "rw",
+        "uid": 1000,
+        "gid": 1000,
+        "required": true,
+        "skip_check": false
+      },
+      "/mnt/kasm_user_share/oem": {
+        "bind": "/oem",
+        "mode": "rw",
+        "uid": 1000,
+        "gid": 1000,
+        "required": true,
+        "skip_check": false
+      }
+    }
+    ```
+
+3.  **Docker Run Config Override:**
+    *   Apply necessary privileges, device access, and environment variables.
+    ```json
+    {
+      "hostname": "kasm",
+      "user": "root",
+      "privileged": true,
+      "devices": [
+        "/dev/kvm",
+        "/dev/net/tun"
+      ],
+      "cap_add": [
+        "NET_ADMIN"
+      ],
+      "environment": {
+        "CPU_CORES": 4,
+        "RAM_SIZE": "8G",
+        "DISK_SIZE": "64G",
+        "BOOT_MODE": "windows_secure",
+        "VERSION": "11",
+        "HOST_PORTS": "443,80",
+        "QEMUDISPLAY": "vnc",
+        "DISK_TYPE": "scsi",
+        "DISK_FMT": "qcow2",
+        "DISK_IO": "threads",
+        "DISK_CACHE": "writeback",
+        "DEBUG": "Y",
+        "RDPFULLSCREEN": "true",
+        "NOAUDIORDP": "true"
+      },
+      "ports": {
+        "3366": 3366,
+        "8006": 8006
+      }
+    }
+    ```
+    *   **Important Resource Limits:** Ensure `CPU_CORES` and `RAM_SIZE` do **not** exceed the limits defined for the Kasm Workspace Agent/Pool.
+    *   **Key Environment Variables:**
+        *   `VERSION`: Specifies the Windows version Dockur should download (e.g., "11", "10", "2022"). See original Dockur docs below for options.
+        *   `QEMUDISPLAY`: Set to `vnc` (recommended for install) or `web`.
+        *   `RDPFULLSCREEN`: See "Recommendations".
+        *   `NOAUDIORDP`: See "Recommendations".
+
+## First Run and Installation
+
+1.  Launch a new session using the configured Kasm Workspace.
+2.  Once the Kasm desktop loads, double-click the `run.sh` script on the desktop.
+3.  A terminal window will appear, initiating the Dockur process (downloading the Windows ISO, preparing storage).
+4.  If `QEMUDISPLAY` is set to `vnc`, a QEMU window will appear within Kasm, showing the Windows installation progress. If set to `web`, you can access the installer via the web interface on port `8006` within Kasm.
+5.  The installation should proceed automatically using the settings and any `oem` customizations.
+6.  **RDP Autostart:** If `RDPFULLSCREEN` is `true` and the `oem/install.bat` ran successfully (configuring RDP on port 3366), the `custom_startup.sh` script will attempt to automatically launch a fullscreen `rdesktop` session once the VM is installed and reachable.
+7.  **Troubleshooting Boot Hang:** If the process seems stuck after creating the ISO but before Windows setup begins, try restarting the Kasm session. This often resolves timing issues.
+
+## Usage Recommendations & Configuration
+
+*   **Installation Display (`QEMUDISPLAY`):** Using `vnc` is generally recommended during the initial Windows installation, as it provides a direct view of the QEMU console within the Kasm session, making troubleshooting easier. You can switch to `web` later if preferred.
+*   **Persistent vs. Non-Persistent Storage:**
+    *   **Persistent:** Map a specific host directory (e.g., `/mnt/kasm_user_share/w11`) to `/storage` inside the container (as shown in the example). Changes made inside the VM will persist across Kasm sessions.
+    *   **Non-Persistent (Snapshot Mode):** To start with a fresh Windows image every time, change the volume mapping target from `/storage` to `/kasm_user_share`. The `custom_startup.sh` script will detect this and automatically create a QCOW2 overlay image based on the disk image in `/kasm_user_share` when the session starts. This overlay is stored in the container's ephemeral `/storage` and is discarded when the session ends.
+*   **Automatic Fullscreen RDP (`RDPFULLSCREEN`):**
+    *   Set to `"true"` to enable the behavior where `custom_startup.sh` waits for the VM to boot and respond to pings, then automatically launches `rdesktop` in fullscreen mode. Requires `rdesktop` to be installed in the container and the VM's RDP to be correctly configured (e.g., by `oem/install.bat`).
+    *   Set to `"false"` (or omit) to disable this automatic connection. You can connect manually using the Remmina shortcut placed on the Kasm desktop or your preferred RDP client.
+*   **Audio Handling & Startup (`NOAUDIORDP`):**
+    *   **Problem:** Kasm typically requires user interaction (like a click) within the session window *before* it fully establishes the audio stream back to the browser. If QEMU starts *before* this interaction happens, the VM might not have access to the correct audio sink, resulting in no sound.
+    *   `"true"`: QEMU starts automatically in the background when the Kasm session loads. This is convenient but **will likely result in no audio** within the VM or Kasm session unless you manually interact *very* quickly. Choose this if you don't need audio or prefer the automatic RDP connection without interaction.
+    *   `"false"` (or omit): The `custom_startup.sh` script will wait for PulseAudio and then open a terminal window prompting you to press Enter. This pause allows you time to click inside the main Kasm window (activating the audio stream) *before* pressing Enter in the terminal to start QEMU. This is the recommended setting **if you need audio** within the Kasm session or the VM itself.
+
+## Compatibility Notes
+
+*   Successfully tested with Windows 10, 11, Server 2012 R2, 2016, 2019, 2022, and 2025 using the `windows_secure` boot mode.
+*   Older Windows versions (7, 8) may have issues, potentially related to ISO download or compatibility.
+*   TPM (Trusted Platform Module) emulation does not seem fully functional, but Secure Boot works. Windows 11 and Server 2022/2025 install correctly despite the lack of a fully functional TPM device in QEMU.
+
+## Acknowledgements
+
+*   This setup builds upon the work started by Husky110 in the [kasm-qemu-docker](https://github.com/Husky110/kasm-qemu-docker/) repository.
+*   It incorporates the core functionality of the excellent [dockur/windows](https://github.com/dockur/windows) project.
+
+---
+*(Original Dockur README follows)*
+---
+
+<h1>Original-Docs:</h1>
 <h1 align="center">Windows<br />
 <div align="center">
 <a href="https://github.com/dockur/windows"><img src="https://github.com/dockur/windows/raw/master/.github/logo.png" title="Logo" style="max-width:100%;" width="128" /></a>
